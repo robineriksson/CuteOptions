@@ -75,13 +75,13 @@ plot_series('QUOTE_DATE','UNDERLYING_PRICE',spot)
 
 to_fly = (df
  .filter(pl.col('QUOTE_DATE')==pl.col('QUOTE_DATE').max())
- .select(pl.col('EXPIRY_DATE'), pl.col('OPTION_RIGHT'), pl.col('MID'),
-         pl.col('MARK_IV'), pl.col('STRIKE'))
+ .select(pl.col('UNDERLYING_PRICE'), pl.col('EXPIRY_DATE'), pl.col('OPTION_RIGHT'), pl.col('MID'),
+         pl.col('MARK_IV'), pl.col('STRIKE'), pl.col('DTE'))
  )
 
 import datetime
 
-smile = to_fly.filter((pl.col('EXPIRY_DATE')==datetime.date(2023,12,31)) &
+smile = to_fly.filter((pl.col('EXPIRY_DATE')==datetime.date(2024,2,23)) &
               (pl.col('OPTION_RIGHT')=='put')).sort(pl.col('STRIKE'))
 
 plot_series('STRIKE','MARK_IV',smile)
@@ -110,4 +110,27 @@ def bs_price(S, K, r, sigma, DTE, option_right:str):
 
     return price
 
-bs_price(42_219, 50_500, 0, 0.914, 0.12442, 'call')
+def bs_price_help(x):
+    return bs_price(S=x['UNDERLYING_PRICE'],K=x['STRIKE'],
+                    r=x['r'],sigma=x['MARK_IV']/100,DTE=x['DTE'],option_right=x['OPTION_RIGHT'])
+
+
+
+
+fair = (smile
+ .with_columns(pl.struct(pl.col('UNDERLYING_PRICE'),
+                         pl.col('STRIKE'),
+                         pl.lit(0).alias('r'),
+                         pl.col('MARK_IV'),
+                         pl.col('DTE'),
+                         pl.col('OPTION_RIGHT'))
+               .map_elements(bs_price_help)
+               .alias('fair'))
+        .select(['STRIKE','fair','MID','UNDERLYING_PRICE'])
+ )
+
+plt.plot(fair['STRIKE'].to_numpy().flatten(),
+         fair['fair'].to_numpy().flatten())
+plt.plot(fair['STRIKE'].to_numpy().flatten(),
+         fair['MID'].to_numpy().flatten())
+plt.show()
