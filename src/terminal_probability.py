@@ -1,4 +1,7 @@
 import polars as pl
+import datetime
+import numpy as np
+from scipy.stats import norm
 
 # 1) load csv
 # 2) calc the price of flies
@@ -79,7 +82,7 @@ to_fly = (df
          pl.col('MARK_IV'), pl.col('STRIKE'), pl.col('DTE'))
  )
 
-import datetime
+
 
 smile = to_fly.filter((pl.col('EXPIRY_DATE')==datetime.date(2024,2,23)) &
               (pl.col('OPTION_RIGHT')=='put')).sort(pl.col('STRIKE'))
@@ -93,44 +96,102 @@ plot_series('STRIKE','FLY',smile_fly)
 
 # black scholes price that bitch ....
 
-import numpy as n
+import numpy as np
 from scipy.stats import norm
 
 
-def bs_price(S, K, r, sigma, DTE, option_right:str):
+def bs_price(F, K, sigma, DTE, option_right:str):
     assert option_right in ['call','put'], 'option right must be put or call'
 
-    d_plus = (np.log(S/K) + (r+sigma**2/2)*DTE) / (sigma*np.sqrt(DTE))
-    d_minus = d_plus - sigma*np.sqrt(DTE)
+    d1 = (np.log(F/K) + (sigma**2/2)*DTE) / (sigma*np.sqrt(DTE))
+    d2 = d1 - sigma*np.sqrt(DTE)
 
     if option_right == 'call':
-        price = norm.cdf(d_plus)*S - norm.cdf(d_minus)*K*np.exp(-r*DTE)
+        price = norm.cdf(d1) - K/F*norm.cdf(d2)
     else:
-        price = norm.cdf(-d_minus)*K*np.exp(-r*DTE) - norm.cdf(-d_plus)*S
+        price = K/F*norm.cdf(-d2) - norm.cdf(-d1)
 
     return price
 
 def bs_price_help(x):
-    return bs_price(S=x['UNDERLYING_PRICE'],K=x['STRIKE'],
-                    r=x['r'],sigma=x['MARK_IV']/100,DTE=x['DTE'],option_right=x['OPTION_RIGHT'])
+    return bs_price(F=x['UNDERLYING_PRICE'],K=x['STRIKE'],
+                    sigma=x['MARK_IV'],DTE=x['DTE'],
+                    option_right=x['OPTION_RIGHT'])
+
+# x = np.arange(1, 100, 1)
+# y = bs_price(x, 50, 0.1, 90/365, 'call')
+# plt.plot(x,y)
+# plt.show()
 
 
 
+expiry_date = datetime.date(2024,3,29)
+end_date = datetime.date(2023,12,31)
+fair = (df.filter((pl.col('EXPIRY_DATE')==expiry_date) &
+                  (pl.col('QUOTE_DATE')==end_date))
+        .with_columns(pl.struct(pl.col('UNDERLYING_PRICE'),
+                                pl.col('STRIKE'),
+                                #pl.lit(40).alias('MARK_IV')/10_000,
+                                pl.col('MARK_IV')/100,
+                                pl.col('DTE')/365,
+                                pl.col('OPTION_RIGHT'))
+                      .map_elements(bs_price_help)
+                      .alias('FAIR'))
+        #.with_columns(FAIR=pl.col('FAIR')/pl.col('UNDERLYING_PRICE'))
+        .select(['STRIKE','FAIR','MID','UNDERLYING_PRICE','OPTION_RIGHT','MARK_IV','DTE'])
+        .sort('STRIKE')
+        )
 
-fair = (smile
- .with_columns(pl.struct(pl.col('UNDERLYING_PRICE'),
-                         pl.col('STRIKE'),
-                         pl.lit(0).alias('r'),
-                         pl.col('MARK_IV'),
-                         pl.col('DTE'),
-                         pl.col('OPTION_RIGHT'))
-               .map_elements(bs_price_help)
-               .alias('fair'))
-        .select(['STRIKE','fair','MID','UNDERLYING_PRICE'])
- )
+# realized: spot.with_columns(((pl.col('UNDERLYING_PRICE').pct_change().add(1).log())).std()*np.sqrt(365))
 
-plt.plot(fair['STRIKE'].to_numpy().flatten(),
-         fair['fair'].to_numpy().flatten())
-plt.plot(fair['STRIKE'].to_numpy().flatten(),
-         fair['MID'].to_numpy().flatten())
+fair_c = fair.filter(pl.col('OPTION_RIGHT')=='call')
+fair_p = fair.filter(pl.col('OPTION_RIGHT')=='put')
+
+plt.plot(fair_c['STRIKE'].to_numpy().flatten(),
+         fair_c['FAIR'].to_numpy().flatten(),'-b',label='call')
+plt.plot(fair_c['STRIKE'].to_numpy().flatten(),
+         fair_c['MID'].to_numpy().flatten(),'--k')
+plt.plot(fair_p['STRIKE'].to_numpy().flatten(),
+         fair_p['FAIR'].to_numpy().flatten(),'-r',label='put')
+plt.plot(fair_p['STRIKE'].to_numpy().flatten(),
+         fair_p['MID'].to_numpy().flatten(),'--g')
+plt.title('Option price as a function of the strike')
+plt.legend()
 plt.show()
+
+## COMMENT:
+# the fitted prices look nice! Next step is to calculate the prices of the flies.
+
+# 1) let now interpolate prices: looking for an equidistant solution.
+
+smin,smax,step = (fair
+                  .with_columns(strike_min=pl.col('STRIKE').unique().min(),
+                                strike_max=pl.col('STRIKE').unique().max(),
+                                strike_step=pl.col('STRIKE').unique().diff().min(),
+                                )
+                  .select('strike_min','strike_max','strike_step')
+                  ).row(0)
+
+fair_i = pl.DataFrame({'STRIKE':np.arange(smin,smax,step)})
+
+fair_i = (fair_i
+          .join((fair
+                 .filter(pl.col('OPTION_RIGHT')=='call')
+                 .select(pl.col('STRIKE'),pl.col('FAIR'))),
+                on='STRIKE', how='left')
+          .with_columns(pl.col('FAIR').interpolate())
+          )
+
+#plot_series('STRIKE','FAIR',fair_i)
+
+
+fly=(fair_i
+     .with_columns(FLY=pl.col('FAIR')-2*pl.col('FAIR').shift(1) + pl.col('FAIR').shift(2))
+     .with_columns(PROB=pl.col('FLY')/pl.col('FLY').sum())
+     .with_columns(pl.when(pl.col('PROB')<0).then(None).otherwise(pl.col('PROB')))
+     .drop_nulls()
+     )
+
+plot_series('STRIKE','PROB',fly)
+
+# comment: finally some progress! the negative values are a bit concerning however, how to solve that???
