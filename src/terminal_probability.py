@@ -3,10 +3,12 @@ import datetime
 import numpy as np
 from scipy.stats import norm
 
-# 1) load csv
-# 2) calc the price of flies
-# 3) normalize
-# 4) chart
+import matplotlib.pyplot as plt
+# [X] load csv
+# [X] calc the price of flies
+# [X] normalize/smooth
+# [ ] repeat per expiry
+# [ ] chart
 
 path_raw = '../data/btc_eod_202312.txt'
 path_clean = '../data/btc_eod_202312.csv'
@@ -25,7 +27,7 @@ def clean_data(path_raw, path_clean):
                 writer.writerow(map(lambda x: x.strip(), rec))
 
 
-import matplotlib.pyplot as plt
+
 
 def plot_series(xcol:str, ycol:str, df:pl.DataFrame):
     x = df.select(pl.col(xcol)).to_numpy().flatten()
@@ -172,26 +174,61 @@ smin,smax,step = (fair
                   .select('strike_min','strike_max','strike_step')
                   ).row(0)
 
-fair_i = pl.DataFrame({'STRIKE':np.arange(smin,smax,step)})
-
-fair_i = (fair_i
+fair_i = (pl
+          .DataFrame({'STRIKE':np.arange(smin,smax,step)})
           .join((fair
                  .filter(pl.col('OPTION_RIGHT')=='call')
                  .select(pl.col('STRIKE'),pl.col('FAIR'))),
                 on='STRIKE', how='left')
           .with_columns(pl.col('FAIR').interpolate())
+          .drop_nulls()
           )
+
+
 
 #plot_series('STRIKE','FAIR',fair_i)
 
 
 fly=(fair_i
      .with_columns(FLY=pl.col('FAIR')-2*pl.col('FAIR').shift(1) + pl.col('FAIR').shift(2))
+     .with_columns(FLY=pl.when(pl.col('FLY')<0).then(None).otherwise(pl.col('FLY')))
      .with_columns(PROB=pl.col('FLY')/pl.col('FLY').sum())
-     .with_columns(pl.when(pl.col('PROB')<0).then(None).otherwise(pl.col('PROB')))
-     .drop_nulls()
+     .with_columns(pl.col('PROB').interpolate())
+     )
+
+
+
+plot_series('STRIKE','PROB',fly)
+plot_series('STRIKE','FAIR',fair_i.with_columns(pl.col('FAIR').diff(1)))
+
+plot_series('STRIKE','FAIR',fair_i.with_columns(pl.col('FAIR')<pl.col('FAIR').shift(1)))
+
+
+#############
+# comment: smoothing the option price, so that the delta becomes smooth!
+# should help with the probabilities.
+
+from scipy.interpolate import UnivariateSpline
+
+spline = UnivariateSpline(fair_i.select('STRIKE').to_numpy().flatten(),
+                          fair_i.select('FAIR').to_numpy().flatten(),
+                          s=1)
+
+fair_i = fair_i.with_columns(FAIR_S=spline(fair_i.select('STRIKE').to_numpy().flatten()))
+
+plot_series('STRIKE','FAIR_S',fair_i.with_columns(pl.col('FAIR_S').diff()))
+
+plot_series('STRIKE','FAIR',fair_i.with_columns(pl.col('FAIR').diff()))
+
+
+fly=(fair_s
+     .with_columns(FLY=pl.col('FAIR_S')-2*pl.col('FAIR_S').shift(1) + pl.col('FAIR_S').shift(2))
+     .with_columns(FLY=pl.when(pl.col('FLY')<0).then(None).otherwise(pl.col('FLY')))
+     .with_columns(PROB=pl.col('FLY')/pl.col('FLY').sum())
      )
 
 plot_series('STRIKE','PROB',fly)
 
-# comment: finally some progress! the negative values are a bit concerning however, how to solve that???
+
+
+# comment: finally some progress! the negative values are a bit concerning however, how to flysolve that???
