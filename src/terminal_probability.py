@@ -29,17 +29,23 @@ def clean_data(path_raw, path_clean):
 
 
 
-def plot_series(xcol:str, ycol:str, df:pl.DataFrame):
-    x = df.select(pl.col(xcol)).to_numpy().flatten()
-    y = df.select(pl.col(ycol)).to_numpy().flatten()
+def plot_series(xcol:str, ycol_list:str, df:pl.DataFrame, style='-'):
+    if not isinstance(ycol_list, list):
+        ycol_list = [ycol_list]
 
-    plt.plot(x,y)
+    x = df.select(pl.col(xcol)).to_numpy().flatten()
+    plt.figure()
+    for ycol in ycol_list:
+        y = df.select(pl.col(ycol)).to_numpy().flatten()
+        plt.plot(x,y,style, label=ycol)
     plt.gcf().autofmt_xdate()
     plt.xlabel(xcol)
     plt.ylabel(ycol)
+    plt.legend()
     plt.show()
 
     return None
+
 
 #############################
 # 1) load the option data.
@@ -129,6 +135,14 @@ def bs_price_help(x):
 
 expiry_date = datetime.date(2024,3,29)
 end_date = datetime.date(2023,12,31)
+
+
+(df.filter((pl.col('EXPIRY_DATE')==expiry_date) &
+                  (pl.col('QUOTE_DATE')==end_date))
+ .select(['STRIKE','MID','UNDERLYING_PRICE','OPTION_RIGHT','MARK_IV','DTE'])
+ .sort('STRIKE')
+ )
+
 fair = (df.filter((pl.col('EXPIRY_DATE')==expiry_date) &
                   (pl.col('QUOTE_DATE')==end_date))
         .with_columns(pl.struct(pl.col('UNDERLYING_PRICE'),
@@ -148,6 +162,13 @@ fair = (df.filter((pl.col('EXPIRY_DATE')==expiry_date) &
 
 fair_c = fair.filter(pl.col('OPTION_RIGHT')=='call')
 fair_p = fair.filter(pl.col('OPTION_RIGHT')=='put')
+
+plot_series('STRIKE','MARK_IV',fair_c,'.')
+
+from scipy.ndimage import gaussian_filter
+plot_series('STRIKE',['MARK_IV','MARK_IVs'],
+            fair_c.with_columns(MARK_IVs = gaussian_filter(fair_c['MARK_IV'], sigma=2)),
+            '.')
 
 plt.plot(fair_c['STRIKE'].to_numpy().flatten(),
          fair_c['FAIR'].to_numpy().flatten(),'-b',label='call')
@@ -169,7 +190,7 @@ plt.show()
 smin,smax,step = (fair
                   .with_columns(strike_min=pl.col('STRIKE').unique().min(),
                                 strike_max=pl.col('STRIKE').unique().max(),
-                                strike_step=pl.col('STRIKE').unique().diff().min(),
+                                strike_step=pl.col('STRIKE').unique().diff().min()/1,
                                 )
                   .select('strike_min','strike_max','strike_step')
                   ).row(0)
@@ -178,18 +199,54 @@ fair_i = (pl
           .DataFrame({'STRIKE':np.arange(smin,smax,step)})
           .join((fair
                  .filter(pl.col('OPTION_RIGHT')=='call')
-                 .select(pl.col('STRIKE'),pl.col('FAIR'))),
-                on='STRIKE', how='left')
+                 .select(pl.col('STRIKE'),pl.col('FAIR'))
+                 ), on='STRIKE', how='left')
           .with_columns(pl.col('FAIR').interpolate())
-          .drop_nulls()
+          # .with_columns(DELTA=pl.col('FAIR').diff())
           )
 
 
 
-#plot_series('STRIKE','FAIR',fair_i)
+plot_series('STRIKE',['FAIR'],fair_i, '.-')
+
+plot_series('STRIKE',['DELTA'],fair_i)
 
 
 fly=(fair_i
+     .with_columns(FLY=pl.col('FAIR')-2*pl.col('FAIR').shift(1) + pl.col('FAIR').shift(2),
+                   MAXPROFIT=pl.col('STRIKE').shift(-1) - pl.col('STRIKE'))
+     .with_columns(FLY=pl.when(pl.col('FLY')<0).then(None).otherwise(pl.col('FLY')))
+     .with_columns(PROB=pl.col('FLY')/pl.col('MAXPROFIT'))
+     .drop_nulls()
+     )
+
+plot_series('STRIKE',['PROB'],fly,'.-')
+
+plot_series('STRIKE',['PROB', 'PROBs'],
+            fly.with_columns(PROBs = gaussian_filter(fly['PROB'], sigma=5)),
+            '.')
+
+xxxxxxxxxxxxxxxxxxx
+fly_tight = fly.filter((pl.col('STRIKE')>40000) & (pl.col('STRIKE')<43000))
+plot_series('STRIKE',['FAIR'],fly_tight,'.-')
+
+plot_series('STRIKE',['DELTA'],fly_tight,'.-')
+
+
+train = fair_i.drop_nulls()
+test = fair_i.filter(pl.col('FAIR').is_null())
+model.fit(train.select('STRIKE'), train.select('FAIR'))
+pred = model.predict(test.select('STRIKE'))
+
+fair_clean = (pl
+              .concat([train, test.with_columns(FAIR=pred.ravel())]).sort('STRIKE')
+              .with_columns(DELTA=pl.col('FAIR').diff())
+              )
+
+plot_series('STRIKE',['FAIR'],fair_clean,'.-')
+plot_series('STRIKE',['DELTA'],fair_clean,'.-')
+
+fly_clean=(fair_clean
      .with_columns(FLY=pl.col('FAIR')-2*pl.col('FAIR').shift(1) + pl.col('FAIR').shift(2))
      .with_columns(FLY=pl.when(pl.col('FLY')<0).then(None).otherwise(pl.col('FLY')))
      .with_columns(PROB=pl.col('FLY')/pl.col('FLY').sum())
@@ -197,38 +254,4 @@ fly=(fair_i
      )
 
 
-
-plot_series('STRIKE','PROB',fly)
-plot_series('STRIKE','FAIR',fair_i.with_columns(pl.col('FAIR').diff(1)))
-
-plot_series('STRIKE','FAIR',fair_i.with_columns(pl.col('FAIR')<pl.col('FAIR').shift(1)))
-
-
-#############
-# comment: smoothing the option price, so that the delta becomes smooth!
-# should help with the probabilities.
-
-from scipy.interpolate import UnivariateSpline
-
-spline = UnivariateSpline(fair_i.select('STRIKE').to_numpy().flatten(),
-                          fair_i.select('FAIR').to_numpy().flatten(),
-                          s=1)
-
-fair_i = fair_i.with_columns(FAIR_S=spline(fair_i.select('STRIKE').to_numpy().flatten()))
-
-plot_series('STRIKE','FAIR_S',fair_i.with_columns(pl.col('FAIR_S').diff()))
-
-plot_series('STRIKE','FAIR',fair_i.with_columns(pl.col('FAIR').diff()))
-
-
-fly=(fair_s
-     .with_columns(FLY=pl.col('FAIR_S')-2*pl.col('FAIR_S').shift(1) + pl.col('FAIR_S').shift(2))
-     .with_columns(FLY=pl.when(pl.col('FLY')<0).then(None).otherwise(pl.col('FLY')))
-     .with_columns(PROB=pl.col('FLY')/pl.col('FLY').sum())
-     )
-
-plot_series('STRIKE','PROB',fly)
-
-
-
-# comment: finally some progress! the negative values are a bit concerning however, how to flysolve that???
+plot_series('STRIKE',['PROB'],fly_clean,'.-')
