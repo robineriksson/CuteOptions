@@ -4,6 +4,11 @@ import numpy as np
 from scipy.stats import norm
 
 import matplotlib.pyplot as plt
+
+import jax
+import jax.numpy as jnp
+from jax.scipy.stats import norm
+
 # [X] load csv
 # [X] calc the price of flies
 # [X] normalize/smooth
@@ -97,22 +102,16 @@ smile = to_fly.filter((pl.col('EXPIRY_DATE')==datetime.date(2024,2,23)) &
 
 plot_series('STRIKE','MARK_IV',smile)
 
-# fly = +1x strike S  -2x strike S+1 + 1x strike S+2
-smile_fly = smile.with_columns(FLY=pl.col('MID') - 2*pl.col('MID').shift(1) + pl.col('MID').shift(2))
-
-plot_series('STRIKE','FLY',smile_fly)
 
 # black scholes price that bitch ....
 
-import numpy as np
-from scipy.stats import norm
 
 
 def bs_price(F, K, sigma, DTE, option_right:str):
     assert option_right in ['call','put'], 'option right must be put or call'
 
-    d1 = (np.log(F/K) + (sigma**2/2)*DTE) / (sigma*np.sqrt(DTE))
-    d2 = d1 - sigma*np.sqrt(DTE)
+    d1 = (jnp.log(F/K) + (sigma**2/2)*DTE) / (sigma*jnp.sqrt(DTE))
+    d2 = d1 - sigma*jnp.sqrt(DTE)
 
     if option_right == 'call':
         price = norm.cdf(d1) - K/F*norm.cdf(d2)
@@ -157,7 +156,35 @@ fair = (df.filter((pl.col('EXPIRY_DATE')==expiry_date) &
         .select(['STRIKE','FAIR','MID','UNDERLYING_PRICE','OPTION_RIGHT','MARK_IV','DTE'])
         .sort('STRIKE')
         )
+xxxxxx
+delta_strike_fn = jax.grad(bs_price, argnums=1)
+gamma_strike_fn = jax.grad(delta_strike_fn, argnums=1)
 
+def calc_rnp(F_range, K, sigma, DTE, option_right:str):
+    """ the risk neutral pdf """
+    gamma_strike = jax.vmap(gamma_strike_fn, (0,None,None,None,None))(F_range, K,
+                                                                      sigma, DTE,
+                                                                      option_right)
+    return jnp.exp(DTE)*gamma_strike
+
+F_range = jnp.linspace(5_000, 100_000, 100)
+K = 50_000.
+sigma=0.5
+DTE=90/365
+option_right='call'
+rnp = calc_rnp(F_range, K, sigma, DTE, option_right)
+
+plt.plot(F_range, rnp, label='Risk netural density')
+plt.show()
+
+# next steps:
+# 1) get this line for all the strikes for one expiry
+# - would loop over (strike, sigma) pairs.
+# 2) do we have OI? thinking this could be used to weight in the average
+# 3) for a specific contract, evolve this chart through time. Should be a nice graph
+# 4) add the timeseries, and move the uncertainty as a cone like thingy.
+
+xxxxxx
 # realized: spot.with_columns(((pl.col('UNDERLYING_PRICE').pct_change().add(1).log())).std()*np.sqrt(365))
 
 fair_c = fair.filter(pl.col('OPTION_RIGHT')=='call')
@@ -196,7 +223,7 @@ smin,smax,step = (fair
                   ).row(0)
 
 fair_i = (pl
-          .DataFrame({'STRIKE':np.arange(smin,smax,step)})
+          .DataFrame({'STRIKE':jnp.arange(smin,smax,step)})
           .join((fair
                  .filter(pl.col('OPTION_RIGHT')=='call')
                  .select(pl.col('STRIKE'),pl.col('FAIR'))
