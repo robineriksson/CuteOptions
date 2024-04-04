@@ -156,7 +156,7 @@ fair = (df.filter((pl.col('EXPIRY_DATE')==expiry_date) &
         .select(['STRIKE','FAIR','MID','UNDERLYING_PRICE','OPTION_RIGHT','MARK_IV','DTE'])
         .sort('STRIKE')
         )
-xxxxxx
+
 delta_strike_fn = jax.grad(bs_price, argnums=1)
 gamma_strike_fn = jax.grad(delta_strike_fn, argnums=1)
 
@@ -183,6 +183,52 @@ plt.show()
 # 2) do we have OI? thinking this could be used to weight in the average
 # 3) for a specific contract, evolve this chart through time. Should be a nice graph
 # 4) add the timeseries, and move the uncertainty as a cone like thingy.
+
+def calc_rnp_help(x):
+    F_range = jnp.linspace(1_000, 120_000, 1_00) #x['UNDERLYING_PRICE']
+    return calc_rnp(F_range=F_range,K=x['STRIKE'],
+                    sigma=x['MARK_IV'],DTE=x['DTE'],
+                    option_right=x['OPTION_RIGHT'])
+
+# run only every friday. Data is expensive to run more ...
+rnp_exp = (df.filter((pl.col('EXPIRY_DATE')==expiry_date) & (pl.col('QUOTE_DATE').dt.weekday()==5))
+        .with_columns(pl.struct(pl.col('STRIKE'),
+                                pl.col('MARK_IV')/100,
+                                pl.col('DTE')/365,
+                                pl.col('OPTION_RIGHT')).map_elements(lambda x: calc_rnp_help(x),
+                                                                     return_dtype=pl.Object).alias('STRIKE_GAMMA'))
+           .select(['QUOTE_DATE','STRIKE_GAMMA'])
+           )
+
+rnp_exp.group_by('QUOTE_DATE').map_groups(lambda x: jnp.vstack(x['STRIKE_GAMMA']).mean(axis=0))
+
+
+xxxxxxxxxxxxxxxxxxx
+# dummy way of doing it seems the best way ...
+
+j=0.5
+for quote_date in rnp_exp['QUOTE_DATE'].unique():
+    rnp_exp_avg = jnp.vstack(rnp_exp.filter(pl.col('QUOTE_DATE')==quote_date)['STRIKE_GAMMA']).mean(axis=0)
+    plt.plot(F_range, rnp_exp_avg, label=quote_date, color='k', alpha=j)
+    j *= 1.1
+
+plt.legend()
+plt.show()
+
+xxx
+
+
+xxxxxxx
+rnp_exp_avg = jnp.vstack(rnp_exp['STRIKE_GAMMA']).mean(axis=0)
+
+rnp_exp_avg /= rnp_exp_avg.sum()
+F_range = jnp.linspace(1_000, 120_000, 1_00)
+
+plt.plot(F_range, rnp_exp_avg, label='Risk netural probablility')
+plt.axvline(44131, color='k', label='underlying')
+plt.axvline(F_range @ rnp_exp_avg, color='r', linestyle='--', label='mean prob')
+plt.legend()
+plt.show()
 
 xxxxxx
 # realized: spot.with_columns(((pl.col('UNDERLYING_PRICE').pct_change().add(1).log())).std()*np.sqrt(365))
