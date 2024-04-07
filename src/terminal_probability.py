@@ -191,28 +191,42 @@ def calc_rnp_help(x):
                     option_right=x['OPTION_RIGHT'])
 
 # run only every friday. Data is expensive to run more ...
-rnp_exp = (df.filter((pl.col('EXPIRY_DATE')==expiry_date) & (pl.col('QUOTE_DATE').dt.weekday()==5))
+expiry_date = datetime.date(2023,12,22)
+t0 = datetime.datetime.today()
+rnp_exp = (df.filter((pl.col('EXPIRY_DATE')==expiry_date))# & (pl.col('QUOTE_DATE').dt.weekday().is_in([1,3,5])))
         .with_columns(pl.struct(pl.col('STRIKE'),
                                 pl.col('MARK_IV')/100,
                                 pl.col('DTE')/365,
                                 pl.col('OPTION_RIGHT')).map_elements(lambda x: calc_rnp_help(x),
                                                                      return_dtype=pl.Object).alias('STRIKE_GAMMA'))
-           .select(['QUOTE_DATE','STRIKE_GAMMA'])
+           .select(['QUOTE_DATE','STRIKE_GAMMA','UNDERLYING_PRICE'])
            )
+t1 = datetime.datetime.today()
+print(t1-t0)
 
-rnp_exp.group_by('QUOTE_DATE').map_groups(lambda x: jnp.vstack(x['STRIKE_GAMMA']).mean(axis=0))
+#rnp_exp.group_by('QUOTE_DATE').map_groups(lambda x: jnp.vstack(x['STRIKE_GAMMA']).mean(axis=0))
 
 
-xxxxxxxxxxxxxxxxxxx
+
 # dummy way of doing it seems the best way ...
 
-j=0.5
-for quote_date in rnp_exp['QUOTE_DATE'].unique():
-    rnp_exp_avg = jnp.vstack(rnp_exp.filter(pl.col('QUOTE_DATE')==quote_date)['STRIKE_GAMMA']).mean(axis=0)
-    plt.plot(F_range, rnp_exp_avg, label=quote_date, color='k', alpha=j)
-    j *= 1.1
 
-plt.legend()
+quote_dates = rnp_exp['QUOTE_DATE'].unique()
+alpha_vec = jnp.linspace(0.1,1,len(quote_dates))
+
+
+for j, date in enumerate(quote_dates):
+    rnp_exp_avg = jnp.vstack(rnp_exp.filter(pl.col('QUOTE_DATE')==date)['STRIKE_GAMMA']).mean(axis=0)
+    underlying = jnp.vstack(rnp_exp.filter(pl.col('QUOTE_DATE')==date)['UNDERLYING_PRICE']).mean(axis=0)
+    if j < len(quote_dates)-1:
+        color='k'
+    else:
+        color='r'
+    plt.axvline(underlying, color=color, alpha=float(alpha_vec[j]), linestyle='--')
+    plt.plot(F_range, rnp_exp_avg, label=date, color=color, alpha=float(alpha_vec[j]))
+
+plt.title(expiry_date)
+#plt.legend()
 plt.show()
 
 xxx
